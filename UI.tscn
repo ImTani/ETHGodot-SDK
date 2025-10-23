@@ -37,6 +37,11 @@ layout_mode = 2
 size_flags_horizontal = 3
 text = "Connect Wallet"
 
+[node name="ReconnectButton" type="Button" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Reconnect Chain"
+
 [node name="DisconnectButton" type="Button" parent="VBoxContainer/HBoxContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
@@ -78,6 +83,10 @@ text = "Sign Message"
 layout_mode = 2
 text = "Read Contract (ERC20 Balance)"
 
+[node name="ReadBatchContractButton" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Read Batch Contract"
+
 [node name="WriteContractButton" type="Button" parent="VBoxContainer"]
 layout_mode = 2
 text = "Write Contract (ERC20 Approve)"
@@ -88,9 +97,11 @@ layout_mode = 2
 [node name="ErrorLabel" type="Label" parent="VBoxContainer"]
 layout_mode = 2
 
-[connection signal="pressed" from="VBoxContainer/HBoxContainer/ConnectButton" to="." method="_on_ConnectButton_pressed"]
-[connection signal="pressed" from="VBoxContainer/HBoxContainer/DisconnectButton" to="." method="_on_DisconnectButton_pressed"]
-[connection signal="pressed" from="VBoxContainer/HBoxContainer2/SendEthButton" to="." method="_on_SendEthButton_pressed"]
-[connection signal="pressed" from="VBoxContainer/HBoxContainer3/SignMsgButton" to="." method="_on_SignMsgButton_pressed"]
-[connection signal="pressed" from="VBoxContainer/ReadContractButton" to="." method="_on_ReadContractButton_pressed"]
-[connection signal="pressed" from="VBoxContainer/WriteContractButton" to="." method="_on_WriteContractButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer/ConnectButton" to="." method="_on_connect_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer/ReconnectButton" to="." method="_on_reconnect_chain_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer/DisconnectButton" to="." method="_on_disconnect_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer2/SendEthButton" to="." method="_on_send_eth_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer3/SignMsgButton" to="." method="_on_sign_msg_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/ReadContractButton" to="." method="_on_read_contract_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/ReadBatchContractButton" to="." method="_on_read_contract_button_pressed"]
+[connection signal="pressed" from="VBoxContainer/WriteContractButton" to="." method="_on_write_contract_button_pressed"]
