@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
+	<title>$GODOT_PROJECT_NAME</title>
+	<style>
+html, body, #canvas {
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+body {
+	color: white;
+	background-color: black;
+	overflow: hidden;
+	touch-action: none;
+}
+
+#canvas {
+	display: block;
+}
+
+#canvas:focus {
+	outline: none;
+}
+
+#status, #status-splash, #status-progress {
+	position: absolute;
+	left: 0;
+	right: 0;
+}
+
+#status, #status-splash {
+	top: 0;
+	bottom: 0;
+}
+
+#status {
+	background-color: $GODOT_SPLASH_COLOR;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	visibility: hidden;
+}
+
+#status-splash {
+	max-height: 100%;
+	max-width: 100%;
+	margin: auto;
+}
+
+#status-splash.show-image--false {
+	display: none;
+}
+
+#status-splash.fullsize--true {
+	height: 100%;
+	width: 100%;
+	object-fit: contain;
+}
+
+#status-splash.use-filter--false {
+	image-rendering: pixelated;
+}
+
+#status-progress, #status-notice {
+	display: none;
+}
+
+#status-progress {
+	bottom: 10%;
+	width: 50%;
+	margin: 0 auto;
+}
+
+#status-notice {
+	background-color: #5b3943;
+	border-radius: 0.5rem;
+	border: 1px solid #9b3943;
+	color: #e0e0e0;
+	font-family: 'Noto Sans', 'Droid Sans', Arial, sans-serif;
+	line-height: 1.3;
+	margin: 0 2rem;
+	overflow: hidden;
+	padding: 1rem;
+	text-align: center;
+	z-index: 1;
+}
+	</style>
+	$GODOT_HEAD_INCLUDE
+</head>
+<body>
+	<canvas id="canvas">
+		Your browser does not support the canvas tag.
+	</canvas>
+
+	<noscript>
+		Your browser does not support JavaScript.
+	</noscript>
+
+	<div id="status">
+		<img id="status-splash" class="$GODOT_SPLASH_CLASSES" src="$GODOT_SPLASH" alt="">
+		<progress id="status-progress"></progress>
+		<div id="status-notice"></div>
+	</div>
+
+	<!-- Load Viem as ES Module -->
+	<script type="module">
+		import { 
+			createPublicClient, 
+			createWalletClient, 
+			custom,
+			http,
+			parseEther,
+			formatEther,
+			getAddress
+		} from 'https://esm.sh/viem@2.21.0';
+
+		// Create the Web3 bridge object
+		window.GodotWeb3 = {
+			// Viem client instances
+			publicClient: null,
+			walletClient: null,
+			currentAccount: null,
+			currentChainId: null,
+
+			// Godot callbacks (will be set during initialization)
+			onAccountsChangedCallback: null,
+			onChainChangedCallback: null,
+
+			// Store Viem functions for use throughout the bridge
+			_viem: {
+				createPublicClient,
+				createWalletClient,
+				custom,
+				http,
+				parseEther,
+				formatEther,
+				getAddress
+			},
+
+			/**
+			 * --- JAVASCRIPT FIX ---
+			 * Pre-define handler properties so they are not 'undefined'
+			 */
+			 _handleAccountsChanged: null,
+			_handleChainChanged: null,
+
+			/**
+			 * Initialize the bridge with Godot callbacks
+			 * @param {Object} callbacks - Object containing Godot callback functions
+			 */
+			initialize: function(callbacks) {
+				console.log('[GodotWeb3] Initializing bridge...');
+				this.onAccountsChangedCallback = callbacks.accountsChanged;
+				this.onChainChangedCallback = callbacks.chainChanged;
+				this._onTransactionReceipt = callbacks.transactionReceipt;
+				
+				// --- JAVASCRIPT FIX ---
+				// Bind event handlers to 'this' context here so they can be added and removed correctly.
+				this._handleAccountsChanged = (accounts) => {
+					console.log('[GodotWeb3] Accounts changed:', accounts);
+					if (accounts.length === 0) {
+						this.currentAccount = null;
+						if (this.onAccountsChangedCallback) {
+							this.onAccountsChangedCallback([null]);
+						}
+					} else {
+						this.currentAccount = accounts[0];
+						if (this.onAccountsChangedCallback) {
+							this.onAccountsChangedCallback([accounts[0]]);
+						}
+					}
+				};
+
+				this._handleChainChanged = (chainId) => {
+					console.log('[GodotWeb3] Chain changed:', chainId);
+					this.currentChainId = parseInt(chainId, 16);
+					if (this.onChainChangedCallback) {
+						this.onChainChangedCallback([this.currentChainId]);
+					}
+					// Consider prompting the user before reloading.
+					window.location.reload();
+				};
+
+				if (typeof window.ethereum === 'undefined') {
+					console.warn('[GodotWeb3] No Ethereum provider detected');
+					return { error: true, code: -1, message: 'No Ethereum provider (like MetaMask) detected in browser' };
+				}
+
+				console.log('[GodotWeb3] Bridge initialized successfully');
+				return { success: true };
+			},
+
+			/**
+			 * Connect to the user's wallet
+			 * @returns {Promise<Object>} Connection result with address or error
+			 */
+			 connect_wallet_js: async function() {
+				try {
+					console.log('[GodotWeb3] Connecting wallet...');
+
+					if (typeof window.ethereum === 'undefined') {
+						return { error: true, code: -1, message: 'No Ethereum provider detected' };
+					}
+
+					this.walletClient = this._viem.createWalletClient({
+						transport: this._viem.custom(window.ethereum)
+					});
+
+					const accounts = await this.walletClient.requestAddresses();
+					
+					if (!accounts || accounts.length === 0) {
+						return { error: true, code: -2, message: 'No accounts returned from wallet' };
+					}
+
+					this.currentAccount = accounts[0];
+
+					const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+					this.currentChainId = parseInt(chainId, 16);
+
+					this.publicClient = this._viem.createPublicClient({
+						transport: this._viem.custom(window.ethereum)
+					});
+
+					this._setupEventListeners();
+
+					console.log('[GodotWeb3] Connected:', this.currentAccount);
+
+					return {
+						address: this.currentAccount,
+						chainId: this.currentChainId
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Connection error:', error);
+					return this._handleError(error, 'connect_wallet_js');
+				}
+			},
+
+			_setupEventListeners: function() {
+				if (!window.ethereum) return;
+				window.ethereum.removeListener('accountsChanged', this._handleAccountsChanged);
+				window.ethereum.removeListener('chainChanged', this._handleChainChanged);
+
+				window.ethereum.on('accountsChanged', this._handleAccountsChanged);
+				window.ethereum.on('chainChanged', this._handleChainChanged);
+			},
+
+			/**
+			 * Read from a smart contract (view/pure functions)
+			 * @param {Object} params - Contract call parameters
+			 * @returns {Promise<Object>} Result or error
+			 */
+			readContract: async function(params) {
+				try {
+					console.log('[GodotWeb3] Reading contract:', params.functionName);
+
+					if (!this.publicClient) {
+						return { error: true, code: -3, message: 'Not connected. Call connect() first.' };
+					}
+
+					const abi = JSON.parse(params.abi);
+					const args = params.args || [];
+
+					const result = await this.publicClient.readContract({
+						address: params.address,
+						abi: abi,
+						functionName: params.functionName,
+						args: args
+					});
+
+					// Convert BigInt to string for Godot
+					const serializedResult = this._serializeValue(result);
+
+					console.log('[GodotWeb3] Read result:', serializedResult);
+
+					return {
+						result: serializedResult,
+						callId: params.callId || ''
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Read contract error:', error);
+					return this._handleError(error, 'readContract', params.callId);
+				}
+			},
+
+			/**
+			 * Write to a smart contract (state-changing functions)
+			 * @param {Object} params - Contract call parameters
+			 * @returns {Promise<Object>} Transaction hash or error
+			 */
+			writeContract: async function(params) {
+				try {
+					console.log('[GodotWeb3] Writing to contract:', params.functionName);
+
+					if (!this.walletClient || !this.currentAccount) {
+						return { error: true, code: -3, message: 'Not connected. Call connect() first.' };
+					}
+
+					const abi = JSON.parse(params.abi);
+					const args = params.args || [];
+
+					const hash = await this.walletClient.writeContract({
+						account: this.currentAccount,
+						address: params.address,
+						abi: abi,
+						functionName: params.functionName,
+						args: args
+					});
+
+					console.log('[GodotWeb3] Transaction sent:', hash);
+
+					// Start watching for receipt in background
+					this._watchTransaction(hash);
+
+					return { hash: hash };
+
+				} catch (error) {
+					console.error('[GodotWeb3] Write contract error:', error);
+					return this._handleError(error, 'writeContract');
+				}
+			},
+
+			/**
+			 * Send native currency (ETH, MATIC, etc.)
+			 * @param {Object} params - Transaction parameters
+			 * @returns {Promise<Object>} Transaction hash or error
+			 */
+			sendNativeToken: async function(params) {
+				try {
+					console.log('[GodotWeb3] Sending native token to:', params.to);
+
+					if (!this.walletClient || !this.currentAccount) {
+						return { error: true, code: -3, message: 'Not connected' };
+					}
+
+					const hash = await this.walletClient.sendTransaction({
+						account: this.currentAccount,
+						to: params.to,
+						value: BigInt(params.valueWei)
+					});
+
+					console.log('[GodotWeb3] Native transfer sent:', hash);
+					this._watchTransaction(hash);
+
+					return { hash: hash };
+
+				} catch (error) {
+					console.error('[GodotWeb3] Send native token error:', error);
+					return this._handleError(error, 'sendNativeToken');
+				}
+			},
+
+			/**
+			 * Sign a personal message
+			 * @param {Object} params - Message parameters
+			 * @returns {Promise<Object>} Signature or error
+			 */
+			signPersonalMessage: async function(params) {
+				try {
+					console.log('[GodotWeb3] Signing message');
+
+					if (!this.walletClient || !this.currentAccount) {
+						return { error: true, code: -3, message: 'Not connected' };
+					}
+
+					const signature = await this.walletClient.signMessage({
+						account: this.currentAccount,
+						message: params.message
+					});
+
+					console.log('[GodotWeb3] Message signed');
+
+					return {
+						signature: signature,
+						originalData: params.message
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Sign message error:', error);
+					return this._handleError(error, 'signMessage');
+				}
+			},
+
+			/**
+			 * Sign typed data (EIP-712) for meta-transactions
+			 * @param {Object} params - Typed data parameters
+			 * @returns {Promise<Object>} Signature or error
+			 */
+			signTypedData: async function(params) {
+				try {
+					console.log('[GodotWeb3] Signing typed data');
+
+					if (!this.walletClient || !this.currentAccount) {
+						return { error: true, code: -3, message: 'Not connected' };
+					}
+
+					const domain = JSON.parse(params.domain);
+					const types = JSON.parse(params.types);
+					const value = JSON.parse(params.value);
+
+					const signature = await this.walletClient.signTypedData({
+						account: this.currentAccount,
+						domain: domain,
+						types: types,
+						primaryType: params.primaryType,
+						message: value
+					});
+
+					console.log('[GodotWeb3] Typed data signed');
+
+					return {
+						signature: signature,
+						originalData: value
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Sign typed data error:', error);
+					return this._handleError(error, 'signTypedData');
+				}
+			},
+
+			/**
+			 * Watch for transaction receipt (called internally)
+			 * @param {string} hash - Transaction hash
+			 * @private
+			 */
+			_watchTransaction: async function(hash) {
+				try {
+					if (!this.publicClient) return;
+
+					const receipt = await this.publicClient.waitForTransactionReceipt({
+						hash: hash,
+						confirmations: 1
+					});
+
+					// Convert receipt to serializable format
+					const serializedReceipt = {
+						blockNumber: receipt.blockNumber.toString(),
+						blockHash: receipt.blockHash,
+						transactionHash: receipt.transactionHash,
+						status: receipt.status,
+						from: receipt.from,
+						to: receipt.to,
+						gasUsed: receipt.gasUsed.toString(),
+						effectiveGasPrice: receipt.effectiveGasPrice.toString()
+					};
+
+					console.log('[GodotWeb3] Transaction confirmed:', hash);
+
+					// This would need a Godot callback to be set up
+					// For now, we'll store it for potential polling
+					if (window.GodotWeb3._onTransactionReceipt) {
+						window.GodotWeb3._onTransactionReceipt(serializedReceipt);
+					}
+
+				} catch (error) {
+					console.error('[GodotWeb3] Error watching transaction:', error);
+				}
+			},
+
+			/**
+			 * Serialize values for Godot (convert BigInt, etc.)
+			 * @param {*} value - Value to serialize
+			 * @returns {*} Serialized value
+			 * @private
+			 */
+			_serializeValue: function(value) {
+				if (typeof value === 'bigint') {
+					return value.toString();
+				}
+				if (Array.isArray(value)) {
+					return value.map(v => this._serializeValue(v));
+				}
+				if (value && typeof value === 'object') {
+					const serialized = {};
+					for (const key in value) {
+						serialized[key] = this._serializeValue(value[key]);
+					}
+					return serialized;
+				}
+				return value;
+			},
+
+			/**
+			 * Handle and format errors
+			 * @param {Error} error - The error object
+			 * @param {string} operation - Operation name
+			 * @param {string} callId - Optional call ID
+			 * @returns {Object} Formatted error object
+			 * @private
+			 */
+			_handleError: function(error, operation, callId = '') {
+				let errorCode = -999;
+				let errorMessage = error.message || 'Unknown error';
+
+				// Parse specific Viem/Ethereum errors
+				if (error.code === 4001 || errorMessage.includes('User rejected')) {
+					errorCode = 4001;
+					errorMessage = 'User rejected the request';
+				} else if (errorMessage.includes('insufficient funds')) {
+					errorCode = -32000;
+					errorMessage = 'Insufficient funds for transaction';
+				} else if (error.name === 'ContractFunctionRevertedError') {
+					errorCode = -32603;
+					errorMessage = `Contract execution reverted: ${error.reason || 'Unknown reason'}`;
+				}
+
+				return {
+					error: true,
+					code: errorCode,
+					message: errorMessage,
+					operationId: callId || operation
+				};
+			}
+		};
+
+		console.log('[GodotWeb3] Bridge loaded and ready');
+	</script>
+
+	<!-- Godot Engine initialization -->
+	<script src="$GODOT_URL"></script>
+	<script>
+const GODOT_CONFIG = $GODOT_CONFIG;
+const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const statusOverlay = document.getElementById('status');
+	const statusProgress = document.getElementById('status-progress');
+	const statusNotice = document.getElementById('status-notice');
+
+	let initializing = true;
+	let statusMode = '';
+
+	function setStatusMode(mode) {
+		if (statusMode === mode || !initializing) {
+			return;
+		}
+		if (mode === 'hidden') {
+			statusOverlay.remove();
+			initializing = false;
+			return;
+		}
+		statusOverlay.style.visibility = 'visible';
+		statusProgress.style.display = mode === 'progress' ? 'block' : 'none';
+		statusNotice.style.display = mode === 'notice' ? 'block' : 'none';
+		statusMode = mode;
+	}
+
+	function setStatusNotice(text) {
+		while (statusNotice.lastChild) {
+			statusNotice.removeChild(statusNotice.lastChild);
+		}
+		const lines = text.split('\n');
+		lines.forEach((line) => {
+			statusNotice.appendChild(document.createTextNode(line));
+			statusNotice.appendChild(document.createElement('br'));
+		});
+	}
+
+	function displayFailureNotice(err) {
+		console.error(err);
+		if (err instanceof Error) {
+			setStatusNotice(err.message);
+		} else if (typeof err === 'string') {
+			setStatusNotice(err);
+		} else {
+			setStatusNotice('An unknown error occurred.');
+		}
+		setStatusMode('notice');
+		initializing = false;
+	}
+
+	const missing = Engine.getMissingFeatures({
+		threads: GODOT_THREADS_ENABLED,
+	});
+
+	if (missing.length !== 0) {
+		if (GODOT_CONFIG['serviceWorker'] && GODOT_CONFIG['ensureCrossOriginIsolationHeaders'] && 'serviceWorker' in navigator) {
+			let serviceWorkerRegistrationPromise;
+			try {
+				serviceWorkerRegistrationPromise = navigator.serviceWorker.getRegistration();
+			} catch (err) {
+				serviceWorkerRegistrationPromise = Promise.reject(new Error('Service worker registration failed.'));
+			}
+			// There's a chance that installing the service worker would fix the issue
+			Promise.race([
+				serviceWorkerRegistrationPromise.then((registration) => {
+					if (registration != null) {
+						return Promise.reject(new Error('Service worker already exists.'));
+					}
+					return registration;
+				}).then(() => engine.installServiceWorker()),
+				// For some reason, `getRegistration()` can stall
+				new Promise((resolve) => {
+					setTimeout(() => resolve(), 2000);
+				}),
+			]).then(() => {
+				// Reload if there was no error.
+				window.location.reload();
+			}).catch((err) => {
+				console.error('Error while registering service worker:', err);
+			});
+		} else {
+			// Display the message as usual
+			const missingMsg = 'Error\nThe following features required to run Godot projects on the Web are missing:\n';
+			displayFailureNotice(missingMsg + missing.join('\n'));
+		}
+	} else {
+		setStatusMode('progress');
+		engine.startGame({
+			'onProgress': function (current, total) {
+				if (current > 0 && total > 0) {
+					statusProgress.value = current;
+					statusProgress.max = total;
+				} else {
+					statusProgress.removeAttribute('value');
+					statusProgress.removeAttribute('max');
+				}
+			},
+		}).then(() => {
+			setStatusMode('hidden');
+		}, displayFailureNotice);
+	}
+}());
+	</script>
+</body>
+</html>

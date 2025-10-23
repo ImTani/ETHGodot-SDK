@@ -1,0 +1,96 @@
+[gd_scene load_steps=2 format=3 uid="uid://dbhhnlfl0flvd"]
+
+[ext_resource type="Script" uid="uid://cc4l1o7yksr0b" path="res://web3tester.gd" id="1_b3bc3"]
+
+[node name="Web3Test" type="Control" node_paths=PackedStringArray("status_label", "address_label", "chain_id_label", "response_label", "error_label", "recipient_edit", "message_edit")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_b3bc3")
+status_label = NodePath("VBoxContainer/StatusLabel")
+address_label = NodePath("VBoxContainer/AddressLabel")
+chain_id_label = NodePath("VBoxContainer/ChainIdLabel")
+response_label = NodePath("VBoxContainer/ResponseLabel")
+error_label = NodePath("VBoxContainer/ErrorLabel")
+recipient_edit = NodePath("VBoxContainer/HBoxContainer2/RecipientEdit")
+message_edit = NodePath("VBoxContainer/HBoxContainer3/MessageEdit")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="StatusLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="HBoxContainer" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="ConnectButton" type="Button" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Connect Wallet"
+
+[node name="DisconnectButton" type="Button" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Disconnect"
+
+[node name="AddressLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="ChainIdLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="HBoxContainer2" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="RecipientEdit" type="LineEdit" parent="VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Recipient Address"
+
+[node name="SendEthButton" type="Button" parent="VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+size_flags_horizontal = 0
+text = "Send 0.001 ETH"
+
+[node name="HBoxContainer3" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="MessageEdit" type="LineEdit" parent="VBoxContainer/HBoxContainer3"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Message to sign"
+
+[node name="SignMsgButton" type="Button" parent="VBoxContainer/HBoxContainer3"]
+layout_mode = 2
+size_flags_horizontal = 0
+text = "Sign Message"
+
+[node name="ReadContractButton" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Read Contract (ERC20 Balance)"
+
+[node name="WriteContractButton" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Write Contract (ERC20 Approve)"
+
+[node name="ResponseLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="ErrorLabel" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+
+[connection signal="pressed" from="VBoxContainer/HBoxContainer/ConnectButton" to="." method="_on_ConnectButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer/DisconnectButton" to="." method="_on_DisconnectButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer2/SendEthButton" to="." method="_on_SendEthButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/HBoxContainer3/SignMsgButton" to="." method="_on_SignMsgButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/ReadContractButton" to="." method="_on_ReadContractButton_pressed"]
+[connection signal="pressed" from="VBoxContainer/WriteContractButton" to="." method="_on_WriteContractButton_pressed"]
