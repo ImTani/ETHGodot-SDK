@@ -474,8 +474,25 @@ func _on_transaction_receipt_js(args: Array) -> void:
 		return
 	
 	var receipt = args[0]
-	print("[Web3Manager] Transaction receipt received: ", receipt.get("transactionHash", ""))
-	transaction_receipt.emit(receipt)
+	
+	var tx_hash = receipt.transactionHash
+	var block_number = receipt.blockNumber
+	var gas_used = receipt.gasUsed
+	var status = receipt.status
+	
+	# If you need to emit a Dictionary, convert it manually
+	var receipt_dict = {
+		"transactionHash": tx_hash,
+		"blockHash": receipt.blockHash,
+		"blockNumber": block_number,
+		"status": status,
+		"from": receipt.from,
+		"to": receipt.to,
+		"gasUsed": gas_used,
+		"effectiveGasPrice": receipt.effectiveGasPrice
+	}
+	
+	transaction_receipt.emit(receipt_dict)
 
 # ============================================================================
 # UTILITY FUNCTIONS

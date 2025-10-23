@@ -498,7 +498,7 @@ body {
 						confirmations: 1
 					});
 
-					// Convert receipt to serializable format
+					// Convert receipt to plain JavaScript object with string values
 					const serializedReceipt = {
 						blockNumber: receipt.blockNumber.toString(),
 						blockHash: receipt.blockHash,
@@ -512,10 +512,10 @@ body {
 
 					console.log('[GodotWeb3] Transaction confirmed:', hash);
 
-					// This would need a Godot callback to be set up
-					// For now, we'll store it for potential polling
-					if (window.GodotWeb3._onTransactionReceipt) {
-						window.GodotWeb3._onTransactionReceipt(serializedReceipt);
+					// Convert to JSON string for Godot (JavaScriptBridge doesn't preserve object properties)
+					if (this._onTransactionReceipt) {
+						console.log('[GodotWeb3] Transaction receipt:', serializedReceipt);
+						this._onTransactionReceipt(serializedReceipt);
 					}
 
 				} catch (error) {
