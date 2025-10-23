@@ -107,7 +107,7 @@ body {
 		<div id="status-notice"></div>
 	</div>
 
-	<!-- Load Viem as ES Module -->
+	<!-- Load Viem as ES Module with Chains -->
 	<script type="module">
 		import { 
 			createPublicClient, 
@@ -118,6 +118,8 @@ body {
 			formatEther,
 			getAddress
 		} from 'https://esm.sh/viem@2.21.0';
+		
+		import * as chains from 'https://esm.sh/viem@2.21.0/chains';
 
 		// Create the Web3 bridge object
 		window.GodotWeb3 = {
@@ -126,12 +128,13 @@ body {
 			walletClient: null,
 			currentAccount: null,
 			currentChainId: null,
+			currentChain: null,
 
 			// Godot callbacks (will be set during initialization)
 			onAccountsChangedCallback: null,
 			onChainChangedCallback: null,
 
-			// Store Viem functions for use throughout the bridge
+			// Store Viem functions and chains for use throughout the bridge
 			_viem: {
 				createPublicClient,
 				createWalletClient,
@@ -140,6 +143,37 @@ body {
 				parseEther,
 				formatEther,
 				getAddress
+			},
+			_chains: chains,
+
+			/**
+			 * Helper function to get chain object from chain ID
+			 * @private
+			 */
+			_getChainById: function(chainId) {
+				// Map of common chain IDs to chain objects
+				const chainMap = {
+					1: this._chains.mainnet,
+					5: this._chains.goerli,
+					11155111: this._chains.sepolia,
+					137: this._chains.polygon,
+					80001: this._chains.polygonMumbai,
+					42161: this._chains.arbitrum,
+					421614: this._chains.arbitrumSepolia,
+					10: this._chains.optimism,
+					420: this._chains.optimismGoerli,
+					56: this._chains.bsc,
+					97: this._chains.bscTestnet,
+					43114: this._chains.avalanche,
+					43113: this._chains.avalancheFuji,
+					250: this._chains.fantom,
+					4002: this._chains.fantomTestnet,
+					100: this._chains.gnosis,
+					8453: this._chains.base,
+					84532: this._chains.baseSepolia,
+				};
+				
+				return chainMap[chainId] || null;
 			},
 
 			/**
@@ -179,6 +213,8 @@ body {
 				this._handleChainChanged = (chainId) => {
 					console.log('[GodotWeb3] Chain changed:', chainId);
 					this.currentChainId = parseInt(chainId, 16);
+					this.currentChain = this._getChainById(this.currentChainId);
+					
 					if (this.onChainChangedCallback) {
 						this.onChainChangedCallback([this.currentChainId]);
 					}
@@ -221,8 +257,21 @@ body {
 
 					const chainId = await window.ethereum.request({ method: 'eth_chainId' });
 					this.currentChainId = parseInt(chainId, 16);
+					
+					// Get the chain object
+					this.currentChain = this._getChainById(this.currentChainId);
+					
+					if (!this.currentChain) {
+						console.warn('[GodotWeb3] Unknown chain ID:', this.currentChainId, '- transactions may fail');
+					}
 
 					this.publicClient = this._viem.createPublicClient({
+						chain: this.currentChain,
+						transport: this._viem.custom(window.ethereum)
+					});
+					
+					this.walletClient = this._viem.createWalletClient({
+						chain: this.currentChain,
 						transport: this._viem.custom(window.ethereum)
 					});
 
@@ -301,6 +350,10 @@ body {
 					if (!this.walletClient || !this.currentAccount) {
 						return { error: true, code: -3, message: 'Not connected. Call connect() first.' };
 					}
+					
+					if (!this.currentChain) {
+						return { error: true, code: -4, message: 'Chain not configured. Please reconnect wallet.' };
+					}
 
 					const abi = JSON.parse(params.abi);
 					const args = params.args || [];
@@ -310,7 +363,8 @@ body {
 						address: params.address,
 						abi: abi,
 						functionName: params.functionName,
-						args: args
+						args: args,
+						chain: this.currentChain
 					});
 
 					console.log('[GodotWeb3] Transaction sent:', hash);
@@ -338,11 +392,16 @@ body {
 					if (!this.walletClient || !this.currentAccount) {
 						return { error: true, code: -3, message: 'Not connected' };
 					}
+					
+					if (!this.currentChain) {
+						return { error: true, code: -4, message: 'Chain not configured. Please reconnect wallet.' };
+					}
 
 					const hash = await this.walletClient.sendTransaction({
 						account: this.currentAccount,
 						to: params.to,
-						value: BigInt(params.valueWei)
+						value: BigInt(params.valueWei),
+						chain: this.currentChain
 					});
 
 					console.log('[GodotWeb3] Native transfer sent:', hash);
