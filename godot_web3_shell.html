@@ -644,7 +644,7 @@ body {
 					console.log('[GodotWeb3] Transaction confirmed:', hash);
 
 					if (this._onTransactionReceipt) {
-						this._onTransactionReceipt([serializedReceipt]);
+						this._onTransactionReceipt(serializedReceipt);
 					}
 
 				} catch (error) {
