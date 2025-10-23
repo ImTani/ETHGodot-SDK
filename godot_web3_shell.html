@@ -116,10 +116,23 @@ body {
 			http,
 			parseEther,
 			formatEther,
-			getAddress
+			getAddress,
+			erc20Abi
 		} from 'https://esm.sh/viem@2.21.0';
 		
 		import * as chains from 'https://esm.sh/viem@2.21.0/chains';
+
+		// Import Yellow Network SDK (Nitrolite)
+		import { 
+			createAppSessionMessage,
+			createAuthRequestMessage,
+			createAuthVerifyMessage,
+			createEIP712AuthMessageSigner,
+			createGetChannelsMessage
+		} from 'https://esm.sh/@erc7824/nitrolite@latest';
+
+		// Store the standard ERC-20 ABI for better MetaMask display
+		window.STANDARD_ERC20_ABI = erc20Abi;
 
 		// Create the Web3 bridge object
 		window.GodotWeb3 = {
@@ -133,6 +146,12 @@ body {
 			// Godot callbacks (will be set during initialization)
 			onAccountsChangedCallback: null,
 			onChainChangedCallback: null,
+
+			// Yellow Network properties
+			yellow_ws: null,
+			yellow_signer: null,
+			yellow_sessionId: null,
+			_yellow_message_callback: null,
 
 			// Store Viem functions and chains for use throughout the bridge
 			_viem: {
@@ -383,8 +402,15 @@ body {
 						return { error: true, code: -5, message: 'Invalid contract address' };
 					}
 
-					const abi = JSON.parse(params.abi);
+					// Parse the provided ABI
+					let abi = JSON.parse(params.abi);
 					const args = params.args || [];
+
+					// Check if this is an ERC-20 function and use standard ABI for consistency
+					const erc20Functions = ['transfer', 'approve', 'transferFrom', 'balanceOf', 'allowance', 'totalSupply', 'decimals', 'symbol', 'name'];
+					if (erc20Functions.includes(params.functionName) && window.STANDARD_ERC20_ABI) {
+						abi = window.STANDARD_ERC20_ABI;
+					}
 
 					const result = await this.publicClient.readContract({
 						address: params.address,
@@ -477,8 +503,31 @@ body {
 						return { error: true, code: -5, message: 'Invalid contract address' };
 					}
 
-					const abi = JSON.parse(params.abi);
+					// Parse the provided ABI
+					let abi = JSON.parse(params.abi);
 					const args = params.args || [];
+
+					// Check if this is an ERC-20 function and use standard ABI for better MetaMask display
+					const erc20Functions = ['transfer', 'approve', 'transferFrom', 'balanceOf', 'allowance'];
+					if (erc20Functions.includes(params.functionName) && window.STANDARD_ERC20_ABI) {
+						console.log('[GodotWeb3] Using standard ERC-20 ABI for better MetaMask display');
+						abi = window.STANDARD_ERC20_ABI;
+					}
+
+					// Simulate the transaction first for better error messages
+					// This also helps MetaMask decode parameters better
+					try {
+						await this.publicClient.simulateContract({
+							account: this.currentAccount,
+							address: params.address,
+							abi: abi,
+							functionName: params.functionName,
+							args: args
+						});
+					} catch (simError) {
+						console.warn('[GodotWeb3] Simulation warning (continuing anyway):', simError.message);
+						// Continue anyway - simulation might fail but transaction could succeed
+					}
 
 					const hash = await this.walletClient.writeContract({
 						account: this.currentAccount,
@@ -714,10 +763,570 @@ body {
 					message: errorMessage,
 					operationId: callId || operation
 				};
+			},
+
+			/**
+			 * Get transaction history from Blockscout API
+			 * @param {Object} params - Parameters including address
+			 * @returns {Promise<Object>} Transaction history or error
+			 */
+			blockscout_getTxHistory: async function(params) {
+				try {
+					console.log('[GodotWeb3] Fetching Blockscout transaction history for:', params.address);
+
+					if (!this._isValidAddress(params.address)) {
+						return { error: true, code: -5, message: 'Invalid address format' };
+					}
+
+					// Determine Blockscout API URL based on current chain
+					const blockscoutUrls = {
+						1: 'https://eth.blockscout.com',
+						11155111: 'https://eth-sepolia.blockscout.com',
+						137: 'https://polygon.blockscout.com',
+						42161: 'https://arbitrum.blockscout.com',
+						421614: 'https://arbitrum-sepolia.blockscout.com',
+						8453: 'https://base.blockscout.com',
+						84532: 'https://base-sepolia.blockscout.com'
+					};
+
+					const baseUrl = blockscoutUrls[this.currentChainId];
+					if (!baseUrl) {
+						return { error: true, code: -4, message: `Blockscout not supported for chain ${this.currentChainId}` };
+					}
+
+					const apiUrl = `${baseUrl}/api/v2/addresses/${params.address}/transactions`;
+
+					console.log('[GodotWeb3] Fetching from:', apiUrl);
+
+					const response = await fetch(apiUrl);
+					if (!response.ok) {
+						throw new Error(`Blockscout API error: ${response.status} ${response.statusText}`);
+					}
+
+					const data = await response.json();
+
+					console.log('[GodotWeb3] Blockscout history fetched:', data.items?.length || 0, 'transactions');
+
+					return {
+						success: true,
+						items: data.items || [],
+						next_page_params: data.next_page_params || null
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Blockscout history error:', error);
+					return this._handleError(error, 'blockscout_getTxHistory');
+				}
+			},
+
+			/**
+			 * Open Yellow Network session with full NitroliteRPC authentication
+			 * @param {Object} params - Parameters for opening session
+			 * @param {string} params.brokerUrl - Yellow Network ClearNode WebSocket URL
+			 * @returns {Promise<Object>} Result with session status
+			 */
+			yellow_openSession: async function(params) {
+				try {
+					console.log('[GodotWeb3] Opening Yellow Network ClearNode session:', params.brokerUrl);
+
+					if (!this.walletClient || !this.currentAccount) {
+						return { error: true, code: -3, message: 'Wallet not connected' };
+					}
+
+					// Close existing WebSocket if any
+					if (this.yellow_ws) {
+						this.yellow_ws.close();
+					}
+
+					// Open WebSocket connection to ClearNode
+					this.yellow_ws = new WebSocket(params.brokerUrl);
+					
+					// Store authentication state
+					this.yellow_authState = 'connecting';
+					this.yellow_sessionId = null;
+
+					return new Promise((resolve, reject) => {
+						let timeoutId = setTimeout(() => {
+							if (this.yellow_authState !== 'authenticated') {
+								this.yellow_ws.close();
+								reject({ error: true, code: -8, message: 'Authentication timeout' });
+							}
+						}, 30000); // 30 second timeout for full auth flow
+
+						this.yellow_ws.onopen = async () => {
+							console.log('[GodotWeb3] Yellow WebSocket connected, starting authentication...');
+							this.yellow_authState = 'connected';
+							
+							try {
+								// Step 1: Create auth request message
+								const authRequest = await createAuthRequestMessage({
+									address: this.currentAccount,
+									session_key: this.currentAccount, // Using same address as session key for simplicity
+									app_name: 'Godot Web3 Game',
+									expire: (Math.floor(Date.now() / 1000) + 3600).toString(), // 1 hour
+									scope: 'console',
+									application: '0x0000000000000000000000000000000000000000', // Null address for now
+									allowances: []
+								});
+								
+								console.log('[GodotWeb3] Sending auth_request to ClearNode');
+								this.yellow_ws.send(authRequest);
+								this.yellow_authState = 'auth_requested';
+								
+							} catch (error) {
+								console.error('[GodotWeb3] Failed to create auth request:', error);
+								clearTimeout(timeoutId);
+								this.yellow_ws.close();
+								reject({ error: true, code: -8, message: 'Failed to create auth request: ' + error.message });
+							}
+						};
+
+						this.yellow_ws.onerror = (error) => {
+							console.error('[GodotWeb3] Yellow WebSocket error:', error);
+							clearTimeout(timeoutId);
+							reject({ error: true, code: -8, message: 'WebSocket connection failed' });
+						};
+
+						this.yellow_ws.onmessage = async (event) => {
+							try {
+								const message = JSON.parse(event.data);
+								console.log('[GodotWeb3] Yellow message received:', message);
+								
+								// Handle different message types based on RPC response format
+								if (message.res && Array.isArray(message.res)) {
+									const [requestId, method, params] = message.res;
+									
+									// Handle auth_challenge
+									if (method === 'auth_challenge') {
+										console.log('[GodotWeb3] Received auth_challenge');
+										this.yellow_authState = 'auth_challenge';
+										
+										try {
+											// Create EIP-712 signer
+											const eip712Signer = createEIP712AuthMessageSigner(
+												this.walletClient,
+												{
+													scope: 'console',
+													application: '0x0000000000000000000000000000000000000000',
+													participant: this.currentAccount,
+													expire: (Math.floor(Date.now() / 1000) + 3600).toString(),
+													allowances: []
+												},
+												{
+													name: 'Godot Web3 Game'
+												}
+											);
+											
+											// Create auth_verify message
+											const authVerify = await createAuthVerifyMessage(
+												eip712Signer,
+												message
+											);
+											
+											console.log('[GodotWeb3] Sending auth_verify to ClearNode');
+											this.yellow_ws.send(authVerify);
+											this.yellow_authState = 'auth_verify_sent';
+											
+										} catch (error) {
+											console.error('[GodotWeb3] Failed to verify auth challenge:', error);
+											clearTimeout(timeoutId);
+											this.yellow_ws.close();
+											reject({ error: true, code: -8, message: 'Auth verification failed: ' + error.message });
+										}
+									}
+									
+									// Handle auth_verify response (success/failure)
+									else if (method === 'auth_verify') {
+										if (params && params.success) {
+											console.log('[GodotWeb3] Authentication successful!');
+											this.yellow_authState = 'authenticated';
+											
+											// Store JWT token if provided
+											if (params.jwtToken) {
+												this.yellow_jwtToken = params.jwtToken;
+												console.log('[GodotWeb3] JWT token stored for reconnection');
+											}
+											
+											// Initialize signer for subsequent operations
+											this.yellow_signer = {
+												address: this.currentAccount,
+												signMessage: async (message) => {
+													return await this.walletClient.signMessage({
+														account: this.currentAccount,
+														message: message
+													});
+												}
+											};
+											
+											clearTimeout(timeoutId);
+											resolve({
+												success: true,
+												message: 'Yellow ClearNode authenticated',
+												authenticated: true
+											});
+										} else {
+											console.error('[GodotWeb3] Authentication failed');
+											clearTimeout(timeoutId);
+											this.yellow_ws.close();
+											reject({ error: true, code: -8, message: 'Authentication failed' });
+										}
+									}
+								}
+								
+								// Handle error responses
+								if (message.err) {
+									console.error('[GodotWeb3] ClearNode error:', message.err);
+									clearTimeout(timeoutId);
+									this.yellow_ws.close();
+									reject({ error: true, code: -8, message: 'ClearNode error: ' + message.err[2] });
+								}
+								
+								// Forward all messages to Godot callback
+								if (this._yellow_message_callback) {
+									this._yellow_message_callback(message);
+								}
+								
+							} catch (parseError) {
+								console.error('[GodotWeb3] Failed to parse Yellow message:', parseError);
+							}
+						};
+
+						this.yellow_ws.onclose = () => {
+							console.log('[GodotWeb3] Yellow WebSocket closed');
+							clearTimeout(timeoutId);
+							this.yellow_authState = 'disconnected';
+							if (this._yellow_message_callback) {
+								this._yellow_message_callback({ type: 'connection_closed' });
+							}
+						};
+					});
+
+				} catch (error) {
+					console.error('[GodotWeb3] Yellow open session error:', error);
+					return this._handleError(error, 'yellow_openSession');
+				}
+			},
+
+			/**
+			 * Get channels from ClearNode
+			 * @returns {Promise<Object>} Result with channels list
+			 */
+			yellow_getChannels: async function() {
+				try {
+					console.log('[GodotWeb3] Getting Yellow Network channels');
+
+					if (!this.yellow_ws || this.yellow_ws.readyState !== WebSocket.OPEN) {
+						return { error: true, code: -8, message: 'Yellow session not connected' };
+					}
+
+					if (this.yellow_authState !== 'authenticated') {
+						return { error: true, code: -8, message: 'Not authenticated with ClearNode' };
+					}
+
+					// Create message signer
+					const messageSigner = async (payload) => {
+						const message = JSON.stringify(payload);
+						return await this.walletClient.signMessage({
+							account: this.currentAccount,
+							message: message
+						});
+					};
+
+					// Create get channels message
+					const getChannelsMsg = await createGetChannelsMessage(
+						messageSigner,
+						this.currentAccount
+					);
+
+					return new Promise((resolve, reject) => {
+						const timeoutId = setTimeout(() => {
+							reject({ error: true, code: -8, message: 'Get channels timeout' });
+						}, 10000);
+
+						// Listen for get_channels response
+						const originalOnMessage = this.yellow_ws.onmessage;
+						this.yellow_ws.onmessage = (event) => {
+							// Call original handler
+							if (originalOnMessage) originalOnMessage(event);
+							
+							try {
+								const message = JSON.parse(event.data);
+								if (message.res && message.res[1] === 'get_channels') {
+									clearTimeout(timeoutId);
+									const channels = message.res[2] || [];
+									console.log('[GodotWeb3] Received channels:', channels.length);
+									resolve({
+										success: true,
+										channels: channels
+									});
+									// Restore original handler
+									this.yellow_ws.onmessage = originalOnMessage;
+								}
+							} catch (error) {
+								console.error('[GodotWeb3] Error parsing channels response:', error);
+							}
+						};
+
+						this.yellow_ws.send(getChannelsMsg);
+					});
+
+				} catch (error) {
+					console.error('[GodotWeb3] Yellow get channels error:', error);
+					return this._handleError(error, 'yellow_getChannels');
+				}
+			},
+
+			/**
+			 * Create Yellow Network app session
+			 * @param {Object} params - Session parameters
+			 * @param {string} params.appDefinition - JSON string of app definition
+			 * @param {string} params.challengeDuration - Challenge duration in seconds
+			 * @returns {Promise<Object>} Result with session ID
+			 */
+			yellow_createSession: async function(params) {
+				try {
+					console.log('[GodotWeb3] Creating Yellow Network app session');
+
+					if (!this.yellow_ws || this.yellow_ws.readyState !== WebSocket.OPEN) {
+						return { error: true, code: -8, message: 'Yellow session not connected' };
+					}
+
+					if (this.yellow_authState !== 'authenticated') {
+						return { error: true, code: -8, message: 'Not authenticated with ClearNode. Call yellow_openSession first.' };
+					}
+
+					if (!this.yellow_signer) {
+						return { error: true, code: -3, message: 'Signer not initialized' };
+					}
+
+					const appDefinition = JSON.parse(params.appDefinition);
+					const challengeDuration = parseInt(params.challengeDuration) || 86400;
+
+					// Create message signer that uses wallet for signing
+					const messageSigner = async (payload) => {
+						const message = JSON.stringify(payload);
+						return await this.walletClient.signMessage({
+							account: this.currentAccount,
+							message: message
+						});
+					};
+
+					// Create app session message using Yellow SDK
+					const sessionMessage = await createAppSessionMessage(
+						messageSigner,
+						this.currentAccount,
+						appDefinition,
+						challengeDuration
+					);
+
+					console.log('[GodotWeb3] Sending create_app_session message');
+
+					return new Promise((resolve, reject) => {
+						const timeoutId = setTimeout(() => {
+							reject({ error: true, code: -8, message: 'Session creation timeout' });
+						}, 30000);
+
+						// Listen for create_app_session response
+						const originalOnMessage = this.yellow_ws.onmessage;
+						this.yellow_ws.onmessage = (event) => {
+							// Call original handler
+							if (originalOnMessage) originalOnMessage(event);
+							
+							try {
+								const message = JSON.parse(event.data);
+								
+								// Handle RPC response format
+								if (message.res && Array.isArray(message.res)) {
+									const [requestId, method, resultParams] = message.res;
+									
+									if (method === 'create_app_session') {
+										clearTimeout(timeoutId);
+										if (resultParams && resultParams.session_id) {
+											console.log('[GodotWeb3] App session created:', resultParams.session_id);
+											this.yellow_sessionId = resultParams.session_id;
+											resolve({
+												success: true,
+												sessionId: resultParams.session_id,
+												message: 'App session created successfully'
+											});
+										} else {
+											reject({ 
+												error: true, 
+												code: -8, 
+												message: 'Session created but no session ID returned' 
+											});
+										}
+										// Restore original handler
+										this.yellow_ws.onmessage = originalOnMessage;
+									}
+								}
+								
+								// Handle error responses
+								if (message.err && message.err[1] === 'create_app_session') {
+									clearTimeout(timeoutId);
+									console.error('[GodotWeb3] Session creation error:', message.err);
+									reject({ 
+										error: true, 
+										code: -8, 
+										message: 'Session creation failed: ' + (message.err[2] || 'Unknown error')
+									});
+									this.yellow_ws.onmessage = originalOnMessage;
+								}
+								
+							} catch (error) {
+								console.error('[GodotWeb3] Error parsing session response:', error);
+							}
+						};
+
+						// Send the session creation message
+						this.yellow_ws.send(sessionMessage);
+					});
+
+				} catch (error) {
+					console.error('[GodotWeb3] Yellow create session error:', error);
+					return this._handleError(error, 'yellow_createSession');
+				}
+			},
+
+			/**
+			 * Send Yellow Network instant payment
+			 * @param {Object} params - Payment parameters
+			 * @param {string} params.recipient - Recipient address
+			 * @param {string} params.amount - Amount in wei (as string)
+			 * @param {string} params.tokenAddress - Token contract address
+			 * @returns {Promise<Object>} Result with payment status
+			 */
+			yellow_sendPayment: async function(params) {
+				try {
+					console.log('[GodotWeb3] Sending Yellow payment:', params);
+
+					if (!this.yellow_ws || this.yellow_ws.readyState !== WebSocket.OPEN) {
+						return { error: true, code: -8, message: 'Yellow session not connected' };
+					}
+
+					if (this.yellow_authState !== 'authenticated') {
+						return { error: true, code: -8, message: 'Not authenticated with ClearNode' };
+					}
+
+					if (!this.yellow_sessionId) {
+						return { error: true, code: -8, message: 'No active Yellow session. Call yellow_createSession first.' };
+					}
+
+					// Create payment state update
+					// NOTE: This is a simplified example. Production implementation needs:
+					// 1. Proper state channel state management
+					// 2. Nonce tracking for ordering
+					// 3. State signatures from both parties
+					// 4. Balance verification
+					const paymentUpdate = {
+						session_id: this.yellow_sessionId,
+						from: this.currentAccount,
+						to: params.recipient,
+						amount: params.amount,
+						token: params.tokenAddress,
+						nonce: Date.now(), // Should be managed properly
+						timestamp: Math.floor(Date.now() / 1000)
+					};
+
+					// Create message signer
+					const messageSigner = async (payload) => {
+						const message = JSON.stringify(payload);
+						return await this.walletClient.signMessage({
+							account: this.currentAccount,
+							message: message
+						});
+					};
+
+					// Sign the payment update
+					const signature = await messageSigner(paymentUpdate);
+					
+					// Create RPC message for payment
+					const paymentMessage = JSON.stringify({
+						req: [
+							Date.now(), // Request ID
+							'send_payment',
+							{
+								...paymentUpdate,
+								signature: signature
+							}
+						]
+					});
+
+					console.log('[GodotWeb3] Sending payment message to ClearNode');
+
+					return new Promise((resolve, reject) => {
+						const timeoutId = setTimeout(() => {
+							reject({ error: true, code: -8, message: 'Payment timeout' });
+						}, 30000);
+
+						// Listen for payment response
+						const originalOnMessage = this.yellow_ws.onmessage;
+						this.yellow_ws.onmessage = (event) => {
+							// Call original handler
+							if (originalOnMessage) originalOnMessage(event);
+							
+							try {
+								const message = JSON.parse(event.data);
+								
+								// Handle RPC response format
+								if (message.res && Array.isArray(message.res)) {
+									const [requestId, method, resultParams] = message.res;
+									
+									if (method === 'send_payment') {
+										clearTimeout(timeoutId);
+										console.log('[GodotWeb3] Payment processed:', resultParams);
+										resolve({
+											success: true,
+											paymentId: resultParams.payment_id || 'unknown',
+											message: 'Payment sent successfully'
+										});
+										// Restore original handler
+										this.yellow_ws.onmessage = originalOnMessage;
+									}
+								}
+								
+								// Handle error responses
+								if (message.err && message.err[1] === 'send_payment') {
+									clearTimeout(timeoutId);
+									console.error('[GodotWeb3] Payment error:', message.err);
+									reject({ 
+										error: true, 
+										code: -8, 
+										message: 'Payment failed: ' + (message.err[2] || 'Unknown error')
+									});
+									this.yellow_ws.onmessage = originalOnMessage;
+								}
+								
+							} catch (error) {
+								console.error('[GodotWeb3] Error parsing payment response:', error);
+							}
+						};
+
+						// Send the payment message
+						this.yellow_ws.send(paymentMessage);
+					});
+
+				} catch (error) {
+					console.error('[GodotWeb3] Yellow send payment error:', error);
+					return this._handleError(error, 'yellow_sendPayment');
+				}
+			},
+
+			/**
+			 * Set callback for Yellow Network messages
+			 * @param {Function} callback - Godot callback function
+			 */
+			yellow_setMessageCallback: function(callback) {
+				console.log('[GodotWeb3] Setting Yellow message callback');
+				this._yellow_message_callback = callback;
+				return { success: true };
 			}
 		};
 
 		console.log('[GodotWeb3] Bridge loaded and ready');
+		
+		// Ensure the bridge is fully available before Godot starts
+		window.dispatchEvent(new Event('godot-web3-ready'));
 	</script>
 
 	<!-- Godot Engine initialization -->
@@ -727,6 +1336,10 @@ const GODOT_CONFIG = $GODOT_CONFIG;
 const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
 const engine = new Engine(GODOT_CONFIG);
 
+// Wait for Web3 bridge to be ready before starting Godot
+function initializeGodot() {
+	console.log('[GodotWeb3] Starting Godot engine initialization...');
+	
 (function () {
 	const statusOverlay = document.getElementById('status');
 	const statusProgress = document.getElementById('status-progress');
@@ -822,6 +1435,19 @@ const engine = new Engine(GODOT_CONFIG);
 		}, displayFailureNotice);
 	}
 }());
+}
+
+// Check if bridge is already ready, otherwise wait for event
+if (window.GodotWeb3) {
+	console.log('[GodotWeb3] Bridge already available, starting Godot immediately');
+	initializeGodot();
+} else {
+	console.log('[GodotWeb3] Waiting for bridge to be ready...');
+	window.addEventListener('godot-web3-ready', function() {
+		console.log('[GodotWeb3] Bridge ready event received, starting Godot');
+		initializeGodot();
+	}, { once: true });
+}
 	</script>
 </body>
 </html>

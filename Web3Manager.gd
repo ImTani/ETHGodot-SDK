@@ -41,6 +41,43 @@ signal contract_read_batch_result(results: Array, batch_id: String)
 ## Emitted on any Web3 operation failure
 signal web3_error(error_code: int, error_message: String, operation_id: String)
 
+## Emitted with transaction history from Blockscout
+signal history_received(transactions: Array)
+
+## Yellow Network: Emitted when a session is successfully created
+signal yellow_session_created(session_id: String, message: Dictionary)
+
+## Yellow Network: Emitted when a payment is sent
+signal yellow_payment_sent(payment_id: String, details: Dictionary)
+
+## Yellow Network: Emitted when a payment is received
+signal yellow_payment_received(payment_data: Dictionary)
+
+## Yellow Network: Emitted on Yellow operation errors
+signal yellow_error(error_code: int, error_message: String, operation: String)
+
+# ============================================================================
+# CONSTANTS - Common Token Addresses
+# ============================================================================
+
+## PayPal USD (PYUSD) contract addresses
+const PYUSD_MAINNET = "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"  # Ethereum Mainnet
+const PYUSD_SEPOLIA = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"  # Ethereum Sepolia
+const PYUSD_ARBITRUM_SEPOLIA = "0x637A1259C6afd7E3AdF63993cA7E58BB438aB1B1"  # Arbitrum Sepolia
+
+## Common chain IDs for reference
+const CHAIN_ETHEREUM_MAINNET = 1
+const CHAIN_ETHEREUM_SEPOLIA = 11155111
+const CHAIN_ARBITRUM_ONE = 42161
+const CHAIN_ARBITRUM_SEPOLIA = 421614
+const CHAIN_BASE = 8453
+const CHAIN_BASE_SEPOLIA = 84532
+
+## Common token decimals for convenience
+const DECIMALS_18 = 18  # Most ERC-20 tokens (ETH, DAI, USDC on some chains)
+const DECIMALS_6 = 6    # USDC, USDT, PYUSD on many chains
+const DECIMALS_8 = 8    # WBTC
+
 # ============================================================================
 # STATE PROPERTIES
 # ============================================================================
@@ -73,6 +110,13 @@ var _read_contract_callback: JavaScriptObject = null
 var _read_contract_batch_callback: JavaScriptObject = null
 var _write_contract_callback: JavaScriptObject = null
 var _signature_callback: JavaScriptObject = null
+var _blockscout_callback: JavaScriptObject = null
+
+## Yellow Network callback references
+var _yellow_open_session_callback: JavaScriptObject = null
+var _yellow_create_session_callback: JavaScriptObject = null
+var _yellow_send_payment_callback: JavaScriptObject = null
+var _yellow_message_callback: JavaScriptObject = null
 
 ## Flag to check if we're running in web export
 var _is_web_export: bool = false
@@ -108,6 +152,13 @@ func _ready() -> void:
 	_read_contract_batch_callback = JavaScriptBridge.create_callback(_on_read_contract_batch_result)
 	_write_contract_callback = JavaScriptBridge.create_callback(_on_write_contract_result)
 	_signature_callback = JavaScriptBridge.create_callback(_on_signature_result)
+	_blockscout_callback = JavaScriptBridge.create_callback(_on_blockscout_result)
+	
+	# Create Yellow Network callbacks
+	_yellow_open_session_callback = JavaScriptBridge.create_callback(_on_yellow_open_session_result)
+	_yellow_create_session_callback = JavaScriptBridge.create_callback(_on_yellow_create_session_result)
+	_yellow_send_payment_callback = JavaScriptBridge.create_callback(_on_yellow_send_payment_result)
+	_yellow_message_callback = JavaScriptBridge.create_callback(_on_yellow_message)
 	
 	# Initialize the JavaScript bridge with our callbacks
 	var callbacks = JavaScriptBridge.create_object("Object")
@@ -289,7 +340,8 @@ func call_contract_batch(params_array: Array) -> void:
 
 ## Helper: Read from ERC-20 token balance
 func get_erc20_balance(token_address: String, owner_address: String, call_id: String = "erc20_balance") -> void:
-	var abi = '[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"stateMutability":"view","type":"function"}]'
+	# Modern ABI format for better compatibility
+	var abi = '[{"type":"function","name":"balanceOf","inputs":[{"name":"account","type":"address","internalType":"address"}],"outputs":[{"name":"","type":"uint256","internalType":"uint256"}],"stateMutability":"view"}]'
 	
 	call_contract({
 		"address": token_address,
@@ -302,7 +354,8 @@ func get_erc20_balance(token_address: String, owner_address: String, call_id: St
 
 ## Helper: Read ERC-20 allowance
 func get_erc20_allowance(token_address: String, owner_address: String, spender_address: String, call_id: String = "erc20_allowance") -> void:
-	var abi = '[{"constant":true,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"stateMutability":"view","type":"function"}]'
+	# Modern ABI format for better compatibility
+	var abi = '[{"type":"function","name":"allowance","inputs":[{"name":"owner","type":"address","internalType":"address"},{"name":"spender","type":"address","internalType":"address"}],"outputs":[{"name":"","type":"uint256","internalType":"uint256"}],"stateMutability":"view"}]'
 	
 	call_contract({
 		"address": token_address,
@@ -315,13 +368,32 @@ func get_erc20_allowance(token_address: String, owner_address: String, spender_a
 
 ## Helper: Approve ERC-20 token spending
 func approve_erc20(token_address: String, spender_address: String, amount_wei: String) -> void:
-	var abi = '[{"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]'
+	# Use full ERC-20 ABI fragment with proper parameter names for better MetaMask display
+	var abi = '[{"type":"function","name":"approve","inputs":[{"name":"spender","type":"address","internalType":"address"},{"name":"amount","type":"uint256","internalType":"uint256"}],"outputs":[{"name":"","type":"bool","internalType":"bool"}],"stateMutability":"nonpayable"}]'
 	
 	call_contract({
 		"address": token_address,
 		"abi": abi,
 		"function_name": "approve",
 		"args": [spender_address, amount_wei],
+		"is_write": true
+	})
+
+## Helper: Transfer ERC-20 tokens (e.g., PYUSD, USDC, DAI)
+## This function sends tokens from the connected wallet to a recipient
+## @param token_address: The contract address of the ERC-20 token
+## @param to_address: The recipient's wallet address
+## @param amount_wei: The amount to send in smallest unit (e.g., wei for 18 decimals)
+## Signals: transaction_response, transaction_receipt, transaction_failed
+func send_erc20(token_address: String, to_address: String, amount_wei: String) -> void:
+	# Use full ERC-20 ABI fragment with proper parameter names for better MetaMask display
+	var abi = '[{"type":"function","name":"transfer","inputs":[{"name":"recipient","type":"address","internalType":"address"},{"name":"amount","type":"uint256","internalType":"uint256"}],"outputs":[{"name":"","type":"bool","internalType":"bool"}],"stateMutability":"nonpayable"}]'
+	
+	call_contract({
+		"address": token_address,
+		"abi": abi,
+		"function_name": "transfer",
+		"args": [to_address, amount_wei],
 		"is_write": true
 	})
 
@@ -413,6 +485,116 @@ func sign_meta_transaction(domain: Dictionary, types: Dictionary, value: Diction
 	promise.then(_signature_callback)
 
 # ============================================================================
+# PUBLIC API - BLOCKSCOUT INTEGRATION
+# ============================================================================
+
+## Get transaction history for an address using Blockscout API
+func get_transaction_history(address: String) -> void:
+	if not _check_web_export():
+		return
+	
+	if not is_valid_address(address):
+		_emit_error_dict(-5, "Invalid address format", "get_transaction_history")
+		return
+	
+	print("[Web3Manager] Fetching transaction history for: ", address, " on ", get_chain_name())
+	
+	var js_params = JavaScriptBridge.create_object("Object")
+	js_params.address = address
+	
+	var promise = _js_bridge.blockscout_getTxHistory(js_params)
+	promise.then(_blockscout_callback)
+
+# ============================================================================
+# YELLOW NETWORK PUBLIC API
+# ============================================================================
+## Yellow Network (ERC-7824 / Nitrolite SDK) Implementation Status
+## 
+## ✅ FULLY IMPLEMENTED:
+## - Complete NitroliteRPC authentication protocol
+## - createAuthRequestMessage → auth_challenge → createAuthVerifyMessage flow
+## - JWT token storage and management
+## - Message parsing with RPC response format
+## - Proper EIP-712 signing for authentication
+## - Session creation with createAppSessionMessage
+## - Payment sending through state channels
+## - Error handling for all protocol steps
+## 
+## ⚠️ TESTING REQUIREMENTS:
+## 1. Create a channel at https://apps.yellow.com/ before testing
+## 2. Update test app definition with real channel details
+## 3. Consider using session keys for production (currently uses main wallet)
+## 
+## Official Docs: https://erc7824.org/quick_start/connect_to_the_clearnode
+## ClearNode URL: wss://clearnet.yellow.com/ws
+## SDK: @erc7824/nitrolite
+## ============================================================================
+
+## Open a Yellow Network session with full NitroliteRPC authentication
+## Implements the complete authentication flow with EIP-712 challenge-response
+## @param broker_url: Yellow Network ClearNode WebSocket URL (use "wss://clearnet.yellow.com/ws")
+## Emits: yellow_session_created on success, yellow_error on failure
+func yellow_open_session(broker_url: String) -> void:
+	if not _check_web_export():
+		return
+	
+	print("[Web3Manager] Opening Yellow Network session: ", broker_url)
+	
+	var js_params = JavaScriptBridge.create_object("Object")
+	js_params.brokerUrl = broker_url
+	
+	var promise = _js_bridge.yellow_openSession(js_params)
+	promise.then(_yellow_open_session_callback)
+
+## Create a Yellow Network app session
+## @param app_definition: Dictionary with channel participants, asset addresses, etc.
+## @param challenge_duration: Time in seconds for challenge period (default 86400 = 1 day)
+## Emits: yellow_session_created on success, yellow_error on failure
+func yellow_create_session(app_definition: Dictionary, challenge_duration: int = 86400) -> void:
+	if not _check_web_export():
+		return
+	
+	print("[Web3Manager] Creating Yellow Network session")
+	
+	var js_params = JavaScriptBridge.create_object("Object")
+	js_params.appDefinition = JSON.stringify(app_definition)
+	js_params.challengeDuration = str(challenge_duration)
+	
+	# Set up message callback if not already done
+	if _yellow_message_callback:
+		_js_bridge.yellow_setMessageCallback(_yellow_message_callback)
+	
+	var promise = _js_bridge.yellow_createSession(js_params)
+	promise.then(_yellow_create_session_callback)
+
+## Send an instant off-chain payment via Yellow Network
+## @param recipient: Recipient Ethereum address
+## @param amount_wei: Amount to send in wei (as a string for precision)
+## @param token_address: ERC-20 token contract address
+## Emits: yellow_payment_sent on success, yellow_error on failure
+func yellow_send_payment(recipient: String, amount_wei: String, token_address: String) -> void:
+	if not _check_web_export():
+		return
+	
+	if not is_valid_address(recipient):
+		_emit_error_dict(-5, "Invalid recipient address", "yellow_send_payment")
+		return
+	
+	if not is_valid_address(token_address):
+		_emit_error_dict(-5, "Invalid token address", "yellow_send_payment")
+		return
+	
+	print("[Web3Manager] Sending Yellow payment: ", amount_wei, " to ", recipient)
+	
+	var js_params = JavaScriptBridge.create_object("Object")
+	js_params.recipient = recipient
+	js_params.amount = amount_wei
+	js_params.tokenAddress = token_address
+	
+	var promise = _js_bridge.yellow_sendPayment(js_params)
+	promise.then(_yellow_send_payment_callback)
+
+# ============================================================================
 # PRIVATE IMPLEMENTATION & RESULT HANDLERS
 # ============================================================================
 
@@ -487,6 +669,146 @@ func _on_signature_result(args: Array) -> void:
 	print("[Web3Manager] Signature successful")
 	signature_successful.emit(result.signature, result.originalData)
 
+## Internal: Handle Blockscout API results
+func _on_blockscout_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		_emit_error(result)
+		return
+	
+	# Convert JavaScript array to GDScript Array
+	var transactions = []
+	var js_items = result.items
+	if js_items:
+		var length = js_items.length
+		for i in range(length):
+			var tx = js_items[i]
+			# Parse the important fields from Blockscout transaction object
+			var tx_data = {
+				"hash": tx.hash if "hash" in str(tx) else "",
+				"from": tx["from"].hash if "from" in str(tx) else "",
+				"to": tx.to.hash if tx.to != null else "",
+				"value": tx.value if "value" in str(tx) else "0",
+				"timestamp": tx.timestamp if "timestamp" in str(tx) else "",
+				"status": tx.status if "status" in str(tx) else "",
+				"method": tx.method if "method" in str(tx) else "",
+				"result": tx.result if "result" in str(tx) else "",
+				"gas_used": tx.gas_used if "gas_used" in str(tx) else "",
+				"block": tx.block if "block" in str(tx) else 0
+			}
+			transactions.append(tx_data)
+	
+	print("[Web3Manager] Received ", transactions.size(), " transactions from Blockscout")
+	history_received.emit(transactions)
+
+# ============================================================================
+# YELLOW NETWORK CALLBACK HANDLERS
+# ============================================================================
+
+## Handle Yellow Network session open result
+func _on_yellow_open_session_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		var error_code = result.code if "code" in str(result) else -8
+		var error_msg = result.message if "message" in str(result) else "Yellow session open failed"
+		print("[Web3Manager] Yellow session open error: ", error_msg)
+		yellow_error.emit(error_code, error_msg, "yellow_open_session")
+		return
+	
+	print("[Web3Manager] Yellow session opened successfully")
+	# Session is ready for app definition creation
+	yellow_session_created.emit("session_ready", {})
+
+## Handle Yellow Network session creation result
+func _on_yellow_create_session_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		var error_code = result.code if "code" in str(result) else -8
+		var error_msg = result.message if "message" in str(result) else "Yellow session creation failed"
+		print("[Web3Manager] Yellow create session error: ", error_msg)
+		yellow_error.emit(error_code, error_msg, "yellow_create_session")
+		return
+	
+	var session_id = result.sessionId if "sessionId" in str(result) else ""
+	var message_obj = result.message if "message" in str(result) else {}
+	
+	# Convert JavaScript object to Dictionary if needed
+	var message_dict = {}
+	if message_obj != null and message_obj != {}:
+		# Try to convert JS object to dict (simplified)
+		message_dict = {"raw": str(message_obj)}
+	
+	print("[Web3Manager] Yellow session created: ", session_id)
+	yellow_session_created.emit(session_id, message_dict)
+
+## Handle Yellow Network payment send result
+func _on_yellow_send_payment_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		var error_code = result.code if "code" in str(result) else -8
+		var error_msg = result.message if "message" in str(result) else "Yellow payment failed"
+		print("[Web3Manager] Yellow payment error: ", error_msg)
+		yellow_error.emit(error_code, error_msg, "yellow_send_payment")
+		return
+	
+	var payment_id = result.paymentId if "paymentId" in str(result) else ""
+	var message_obj = result.message if "message" in str(result) else {}
+	
+	# Convert JavaScript object to Dictionary
+	var details = {}
+	if message_obj != null and message_obj != {}:
+		details = {"raw": str(message_obj)}
+	
+	print("[Web3Manager] Yellow payment sent: ", payment_id)
+	yellow_payment_sent.emit(payment_id, details)
+
+## Handle incoming Yellow Network messages (payments, state updates, etc.)
+func _on_yellow_message(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var message = args[0]
+	
+	# Check message type
+	var msg_type = message.type if "type" in str(message) else ""
+	
+	if msg_type == "payment":
+		# Incoming payment received
+		var payment_data = {
+			"from": message["from"] if "from" in str(message) else "",
+			"to": message.to if "to" in str(message) else "",
+			"amount": message.amount if "amount" in str(message) else "0",
+			"token_address": message.tokenAddress if "tokenAddress" in str(message) else "",
+			"timestamp": message.timestamp if "timestamp" in str(message) else 0,
+			"signature": message.signature if "signature" in str(message) else ""
+		}
+		print("[Web3Manager] Yellow payment received from: ", payment_data["from"])
+		yellow_payment_received.emit(payment_data)
+	
+	elif msg_type == "connection_closed":
+		print("[Web3Manager] Yellow WebSocket connection closed")
+		yellow_error.emit(-8, "Yellow connection closed", "yellow_message")
+	
+	else:
+		# Other message types - could add more handling here
+		print("[Web3Manager] Yellow message received: ", msg_type)
+
 ## Check if we're running in web export
 func _check_web_export() -> bool:
 	if not _is_web_export:
@@ -544,8 +866,40 @@ func _emit_error(error_result) -> void:
 	var message = error_result.message if "message" in str(error_result) else "Unknown error"
 	var op_id = error_result.operationId if "operationId" in str(error_result) else ""
 	
-	push_error("[Web3Manager] Error (%d): %s" % [code, message])
-	web3_error.emit(code, message, op_id)
+	# Provide user-friendly error messages based on error code
+	var friendly_message = _get_friendly_error_message(code, message)
+	
+	# Only use push_error for actual errors, not user rejections
+	if code == 4001:
+		print("[Web3Manager] User rejected request: %s" % op_id)
+	else:
+		push_error("[Web3Manager] Error (%d): %s" % [code, friendly_message])
+	
+	web3_error.emit(code, friendly_message, op_id)
+
+## Get user-friendly error message
+func _get_friendly_error_message(code: int, original_message: String) -> String:
+	match code:
+		4001:
+			return "Transaction cancelled by user"
+		-32000:
+			return "Insufficient funds for transaction"
+		-32603:
+			return "Contract execution failed: " + original_message
+		-32602:
+			return "Invalid parameters"
+		-32601:
+			return "Method not found"
+		-32700:
+			return "Invalid JSON request"
+		-3:
+			return "Wallet not connected"
+		-4:
+			return "Network not supported"
+		-5:
+			return "Invalid address format"
+		_:
+			return original_message
 
 ## Emit a web3_error signal from custom values
 func _emit_error_dict(code: int, message: String, operation_id: String) -> void:
@@ -627,6 +981,38 @@ func format_address_short(address: String) -> String:
 	if address.length() < 10:
 		return address
 	return address.substr(0, 6) + "..." + address.substr(address.length() - 4, 4)
+
+## Get PYUSD contract address for current chain
+func get_pyusd_address() -> String:
+	match chain_id:
+		CHAIN_ETHEREUM_MAINNET:
+			return PYUSD_MAINNET
+		CHAIN_ETHEREUM_SEPOLIA:
+			return PYUSD_SEPOLIA
+		CHAIN_ARBITRUM_SEPOLIA:
+			return PYUSD_ARBITRUM_SEPOLIA
+		_:
+			push_warning("[Web3Manager] PYUSD not available on chain ", chain_id)
+			return ""
+
+## Get chain name from chain ID
+func get_chain_name(chain_id_param: int = 0) -> String:
+	var id = chain_id_param if chain_id_param > 0 else chain_id
+	match id:
+		CHAIN_ETHEREUM_MAINNET:
+			return "Ethereum Mainnet"
+		CHAIN_ETHEREUM_SEPOLIA:
+			return "Ethereum Sepolia"
+		CHAIN_ARBITRUM_ONE:
+			return "Arbitrum One"
+		CHAIN_ARBITRUM_SEPOLIA:
+			return "Arbitrum Sepolia"
+		CHAIN_BASE:
+			return "Base"
+		CHAIN_BASE_SEPOLIA:
+			return "Base Sepolia"
+		_:
+			return "Chain " + str(id)
 
 ## FIX: Validate Ethereum address format (basic check)
 func is_valid_address(address: String) -> bool:
