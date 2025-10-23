@@ -1,6 +1,5 @@
 # Web3Manager.gd
 # Autoload singleton for Web3 blockchain integration.
-# FIXED: Proper Dictionary to JavaScript Object conversion
 # Add this script in Project Settings > Autoload with the name "Web3Manager".
 
 extends Node
@@ -24,14 +23,20 @@ signal chain_changed(new_chain_id: int)
 ## Emitted immediately after transaction submission
 signal transaction_response(hash: String)
 
-## Emitted when transaction is mined and confirmed
-signal transaction_receipt(receipt: Dictionary)
+## Emitted when transaction is mined and confirmed (receipt is JavaScriptObject)
+signal transaction_receipt(receipt: JavaScriptObject)
+
+## Emitted when transaction times out or fails after submission
+signal transaction_failed(hash: String, error_message: String)
 
 ## Emitted after successful message or typed data signing
 signal signature_successful(signature: String, original_data: Variant)
 
 ## Emitted with result of read-only contract call
 signal contract_read_result(result: Variant, call_id: String)
+
+## Emitted with results of batch contract reads
+signal contract_read_batch_result(results: Array, batch_id: String)
 
 ## Emitted on any Web3 operation failure
 signal web3_error(error_code: int, error_message: String, operation_id: String)
@@ -63,7 +68,9 @@ var _transaction_receipt_callback: JavaScriptObject = null
 
 ## Promise callback references (CRITICAL: must store these!)
 var _connect_wallet_callback: JavaScriptObject = null
+var _reconnect_chain_callback: JavaScriptObject = null
 var _read_contract_callback: JavaScriptObject = null
+var _read_contract_batch_callback: JavaScriptObject = null
 var _write_contract_callback: JavaScriptObject = null
 var _signature_callback: JavaScriptObject = null
 
@@ -94,9 +101,11 @@ func _ready() -> void:
 	_chain_changed_callback = JavaScriptBridge.create_callback(_on_chain_changed_js)
 	_transaction_receipt_callback = JavaScriptBridge.create_callback(_on_transaction_receipt_js)
 	
-	# Create Promise callbacks (CRITICAL FIX)
+	# Create Promise callbacks
 	_connect_wallet_callback = JavaScriptBridge.create_callback(_on_connect_wallet_result)
+	_reconnect_chain_callback = JavaScriptBridge.create_callback(_on_reconnect_chain_result)
 	_read_contract_callback = JavaScriptBridge.create_callback(_on_read_contract_result)
+	_read_contract_batch_callback = JavaScriptBridge.create_callback(_on_read_contract_batch_result)
 	_write_contract_callback = JavaScriptBridge.create_callback(_on_write_contract_result)
 	_signature_callback = JavaScriptBridge.create_callback(_on_signature_result)
 	
@@ -189,6 +198,31 @@ func disconnect_wallet() -> void:
 	wallet_disconnected.emit()
 	print("[Web3Manager] Disconnected")
 
+## Reconnect to current chain after chain change
+## Emits: wallet_connected() with updated chain on success
+func reconnect_to_chain() -> void:
+	if not _check_connection():
+		return
+	
+	print("[Web3Manager] Reconnecting to current chain...")
+	
+	var promise = _js_bridge.reconnectToChain()
+	promise.then(_reconnect_chain_callback)
+
+func _on_reconnect_chain_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		_emit_error(result)
+		return
+	
+	chain_id = result.chainId
+	print("[Web3Manager] Reconnected to chain: ", chain_id)
+	wallet_connected.emit(account_address, chain_id)
+
 # ============================================================================
 # PUBLIC API - SMART CONTRACT INTERACTION
 # ============================================================================
@@ -201,6 +235,11 @@ func call_contract(params: Dictionary) -> void:
 	# Validate required parameters
 	if not params.has("address") or not params.has("abi") or not params.has("function_name"):
 		_emit_error_dict(-1, "Missing required parameters: address, abi, function_name", "call_contract")
+		return
+	
+	# FIX: Validate address format
+	if not is_valid_address(params["address"]):
+		_emit_error_dict(-5, "Invalid contract address format", "call_contract")
 		return
 	
 	# Ensure args exists
@@ -217,6 +256,36 @@ func call_contract(params: Dictionary) -> void:
 		_call_write_contract(params)
 	else:
 		_call_read_contract(params)
+
+## Batch read multiple contract functions efficiently
+## params_array: Array of dictionaries with same structure as call_contract
+func call_contract_batch(params_array: Array) -> void:
+	if not _check_connection():
+		return
+	
+	if params_array.size() == 0:
+		_emit_error_dict(-1, "Empty batch array", "call_contract_batch")
+		return
+	
+	# Validate all parameters
+	for params in params_array:
+		if not params.has("address") or not params.has("abi") or not params.has("function_name"):
+			_emit_error_dict(-1, "Missing required parameters in batch", "call_contract_batch")
+			return
+		
+		if not is_valid_address(params["address"]):
+			_emit_error_dict(-5, "Invalid address in batch", "call_contract_batch")
+			return
+		
+		if not params.has("args"):
+			params["args"] = []
+	
+	print("[Web3Manager] Batch reading ", params_array.size(), " contracts...")
+	
+	# Convert array of dictionaries to JavaScript array
+	var js_array = _array_to_js_array(params_array)
+	var promise = _js_bridge.readContractBatch(js_array)
+	promise.then(_read_contract_batch_callback)
 
 ## Helper: Read from ERC-20 token balance
 func get_erc20_balance(token_address: String, owner_address: String, call_id: String = "erc20_balance") -> void:
@@ -291,9 +360,17 @@ func send_native_token(to_address: String, value_wei: String) -> void:
 	if not _check_connection():
 		return
 	
+	# FIX: Validate inputs
+	if not is_valid_address(to_address):
+		_emit_error_dict(-5, "Invalid recipient address", "send_native_token")
+		return
+	
+	if not _is_valid_wei_amount(value_wei):
+		_emit_error_dict(-6, "Invalid wei amount", "send_native_token")
+		return
+	
 	print("[Web3Manager] Sending native token to: ", to_address)
 	
-	# CRITICAL FIX: Create JavaScript object properly
 	var js_params = JavaScriptBridge.create_object("Object")
 	js_params.to = to_address
 	js_params.valueWei = value_wei
@@ -308,7 +385,6 @@ func sign_personal_message(message: String) -> void:
 	
 	print("[Web3Manager] Requesting message signature...")
 	
-	# CRITICAL FIX: Create JavaScript object properly
 	var js_params = JavaScriptBridge.create_object("Object")
 	js_params.message = message
 	
@@ -327,7 +403,6 @@ func sign_meta_transaction(domain: Dictionary, types: Dictionary, value: Diction
 	var types_json = JSON.stringify(types)
 	var value_json = JSON.stringify(value)
 	
-	# CRITICAL FIX: Create JavaScript object properly
 	var js_params = JavaScriptBridge.create_object("Object")
 	js_params.domain = domain_json
 	js_params.types = types_json
@@ -343,7 +418,6 @@ func sign_meta_transaction(domain: Dictionary, types: Dictionary, value: Diction
 
 ## Internal: Handle read-only contract calls
 func _call_read_contract(params: Dictionary) -> void:
-	# CRITICAL FIX: Convert Dictionary to JavaScript Object
 	var js_params = _dict_to_js_object(params)
 	var promise = _js_bridge.readContract(js_params)
 	promise.then(_read_contract_callback)
@@ -360,9 +434,28 @@ func _on_read_contract_result(args: Array) -> void:
 	
 	contract_read_result.emit(result.result, result.callId)
 
+## Internal: Handle batch read results
+func _on_read_contract_batch_result(args: Array) -> void:
+	if args.size() == 0:
+		return
+	
+	var result = args[0]
+	
+	if _is_error_result(result):
+		_emit_error(result)
+		return
+	
+	# Convert JavaScriptObject array to GDScript Array
+	var results_array = []
+	var js_results = result.results
+	var length = js_results.length
+	for i in range(length):
+		results_array.append(js_results[i])
+	
+	contract_read_batch_result.emit(results_array, result.batchId)
+
 ## Internal: Handle state-changing contract calls
 func _call_write_contract(params: Dictionary) -> void:
-	# CRITICAL FIX: Convert Dictionary to JavaScript Object
 	var js_params = _dict_to_js_object(params)
 	var promise = _js_bridge.writeContract(js_params)
 	promise.then(_write_contract_callback)
@@ -414,17 +507,48 @@ func _check_connection() -> bool:
 	
 	return true
 
-## Check if a JavaScript result is an error
+## FIX: Check if a result is an error (works with JavaScriptObjects)
 func _is_error_result(result: Variant) -> bool:
+	# JavaScriptObjects support property access but aren't Dictionaries
+	# Check if the 'error' property exists and is truthy
+	if result == null:
+		return false
+	
+	# Try to access the error property - works for both Dictionary and JavaScriptObject
+	var has_error = false
 	if result is Dictionary:
-		return result.get("error", false)
-	return false
+		has_error = result.get("error", false)
+	else:
+		# For JavaScriptObject, try property access
+		# Use a try-catch pattern via checking if property exists
+		var error_val = result.error if "error" in str(result) else false
+		# Safer: directly access and handle null
+		if result.has("error"):
+			has_error = result.error
+		else:
+			# Direct property access (JavaScriptObject allows this)
+			has_error = result.error if result.error != null else false
+	
+	return has_error
+
+## FIX: Validate wei amount (positive number string)
+func _is_valid_wei_amount(amount: String) -> bool:
+	if amount == "":
+		return false
+	if amount == "0":
+		return true
+	# Check if it's all digits
+	for i in range(amount.length()):
+		var c = amount[i]
+		if not (c in "0123456789"):
+			return false
+	return true
 
 ## Emit a web3_error signal from a JavaScript error result
-func _emit_error(error_result: Dictionary) -> void:
-	var code = error_result.get("code", -999)
-	var message = error_result.get("message", "Unknown error")
-	var op_id = error_result.get("operationId", "")
+func _emit_error(error_result) -> void:
+	var code = error_result.code if "code" in str(error_result) else -999
+	var message = error_result.message if "message" in str(error_result) else "Unknown error"
+	var op_id = error_result.operationId if "operationId" in str(error_result) else ""
 	
 	push_error("[Web3Manager] Error (%d): %s" % [code, message])
 	web3_error.emit(code, message, op_id)
@@ -466,33 +590,28 @@ func _on_chain_changed_js(args: Array) -> void:
 	chain_id = new_chain_id
 	
 	print("[Web3Manager] Chain changed to: ", chain_id)
+	print("[Web3Manager] Note: You may need to call reconnect_to_chain() to update clients")
 	chain_changed.emit(chain_id)
 
-## Called by JavaScript when transaction receipt is available
+## FIX: Called by JavaScript when transaction receipt is available or fails
 func _on_transaction_receipt_js(args: Array) -> void:
 	if args.size() == 0:
 		return
 	
 	var receipt = args[0]
 	
-	var tx_hash = receipt.transactionHash
-	var block_number = receipt.blockNumber
-	var gas_used = receipt.gasUsed
-	var status = receipt.status
+	# Check if this is an error result
+	if _is_error_result(receipt):
+		var tx_hash = receipt.hash if "hash" in str(receipt) else "unknown"
+		var error_msg = receipt.message if "message" in str(receipt) else "Transaction failed"
+		print("[Web3Manager] Transaction failed: ", tx_hash, " - ", error_msg)
+		transaction_failed.emit(tx_hash, error_msg)
+		return
 	
-	# If you need to emit a Dictionary, convert it manually
-	var receipt_dict = {
-		"transactionHash": tx_hash,
-		"blockHash": receipt.blockHash,
-		"blockNumber": block_number,
-		"status": status,
-		"from": receipt.from,
-		"to": receipt.to,
-		"gasUsed": gas_used,
-		"effectiveGasPrice": receipt.effectiveGasPrice
-	}
-	
-	transaction_receipt.emit(receipt_dict)
+	# FIX: Pass JavaScriptObject directly - consumers can access properties
+	# No need to manually convert to Dictionary
+	print("[Web3Manager] Transaction confirmed: ", receipt.transactionHash)
+	transaction_receipt.emit(receipt)
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -517,7 +636,7 @@ func format_address_short(address: String) -> String:
 		return address
 	return address.substr(0, 6) + "..." + address.substr(address.length() - 4, 4)
 
-## Validate Ethereum address format (basic check)
+## FIX: Validate Ethereum address format (basic check)
 func is_valid_address(address: String) -> bool:
 	if not address.begins_with("0x"):
 		return false

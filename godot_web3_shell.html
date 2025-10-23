@@ -177,10 +177,39 @@ body {
 			},
 
 			/**
-			 * --- JAVASCRIPT FIX ---
-			 * Pre-define handler properties so they are not 'undefined'
+			 * Validate Ethereum address format
+			 * @private
 			 */
-			 _handleAccountsChanged: null,
+			_isValidAddress: function(address) {
+				if (typeof address !== 'string') return false;
+				if (!address.startsWith('0x')) return false;
+				if (address.length !== 42) return false;
+				const hexPart = address.slice(2);
+				return /^[0-9a-fA-F]+$/.test(hexPart);
+			},
+
+			/**
+			 * Validate wei amount (must be positive number string)
+			 * @private
+			 */
+			_isValidWeiAmount: function(amount) {
+				if (typeof amount !== 'string') return false;
+				if (amount === '' || amount === '0') return true;
+				if (!/^\d+$/.test(amount)) return false;
+				// Check for reasonable upper bound (avoid overflow)
+				try {
+					BigInt(amount);
+					return true;
+				} catch {
+					return false;
+				}
+			},
+
+			/**
+			 * Pre-define handler properties
+			 * @private
+			 */
+			_handleAccountsChanged: null,
 			_handleChainChanged: null,
 
 			/**
@@ -193,8 +222,7 @@ body {
 				this.onChainChangedCallback = callbacks.chainChanged;
 				this._onTransactionReceipt = callbacks.transactionReceipt;
 				
-				// --- JAVASCRIPT FIX ---
-				// Bind event handlers to 'this' context here so they can be added and removed correctly.
+				// Bind event handlers
 				this._handleAccountsChanged = (accounts) => {
 					console.log('[GodotWeb3] Accounts changed:', accounts);
 					if (accounts.length === 0) {
@@ -218,8 +246,6 @@ body {
 					if (this.onChainChangedCallback) {
 						this.onChainChangedCallback([this.currentChainId]);
 					}
-					// Consider prompting the user before reloading.
-					window.location.reload();
 				};
 
 				if (typeof window.ethereum === 'undefined') {
@@ -235,7 +261,7 @@ body {
 			 * Connect to the user's wallet
 			 * @returns {Promise<Object>} Connection result with address or error
 			 */
-			 connect_wallet_js: async function() {
+			connect_wallet_js: async function() {
 				try {
 					console.log('[GodotWeb3] Connecting wallet...');
 
@@ -290,6 +316,47 @@ body {
 				}
 			},
 
+			/**
+			 * Reconnect to current chain (useful after chain change)
+			 * @returns {Promise<Object>} Result or error
+			 */
+			reconnectToChain: async function() {
+				try {
+					if (!this.currentAccount) {
+						return { error: true, code: -3, message: 'Not connected' };
+					}
+
+					const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+					this.currentChainId = parseInt(chainId, 16);
+					this.currentChain = this._getChainById(this.currentChainId);
+
+					if (!this.currentChain) {
+						return { error: true, code: -4, message: 'Unknown chain ID: ' + this.currentChainId };
+					}
+
+					this.publicClient = this._viem.createPublicClient({
+						chain: this.currentChain,
+						transport: this._viem.custom(window.ethereum)
+					});
+					
+					this.walletClient = this._viem.createWalletClient({
+						chain: this.currentChain,
+						transport: this._viem.custom(window.ethereum)
+					});
+
+					console.log('[GodotWeb3] Reconnected to chain:', this.currentChainId);
+
+					return {
+						success: true,
+						chainId: this.currentChainId
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Reconnect error:', error);
+					return this._handleError(error, 'reconnectToChain');
+				}
+			},
+
 			_setupEventListeners: function() {
 				if (!window.ethereum) return;
 				window.ethereum.removeListener('accountsChanged', this._handleAccountsChanged);
@@ -312,6 +379,10 @@ body {
 						return { error: true, code: -3, message: 'Not connected. Call connect() first.' };
 					}
 
+					if (!this._isValidAddress(params.address)) {
+						return { error: true, code: -5, message: 'Invalid contract address' };
+					}
+
 					const abi = JSON.parse(params.abi);
 					const args = params.args || [];
 
@@ -322,8 +393,7 @@ body {
 						args: args
 					});
 
-					// Convert BigInt to string for Godot
-					const serializedResult = this._serializeValue(result);
+					const serializedResult = this._serializeBigInts(result);
 
 					console.log('[GodotWeb3] Read result:', serializedResult);
 
@@ -335,6 +405,54 @@ body {
 				} catch (error) {
 					console.error('[GodotWeb3] Read contract error:', error);
 					return this._handleError(error, 'readContract', params.callId);
+				}
+			},
+
+			/**
+			 * Batch read from multiple smart contracts
+			 * @param {Array} paramsArray - Array of contract call parameters
+			 * @returns {Promise<Object>} Results array or error
+			 */
+			readContractBatch: async function(paramsArray) {
+				try {
+					console.log('[GodotWeb3] Batch reading contracts:', paramsArray.length);
+
+					if (!this.publicClient) {
+						return { error: true, code: -3, message: 'Not connected' };
+					}
+
+					// Validate all addresses first
+					for (const params of paramsArray) {
+						if (!this._isValidAddress(params.address)) {
+							return { error: true, code: -5, message: 'Invalid contract address in batch' };
+						}
+					}
+
+					// Execute all reads in parallel
+					const promises = paramsArray.map(params => {
+						const abi = JSON.parse(params.abi);
+						const args = params.args || [];
+						return this.publicClient.readContract({
+							address: params.address,
+							abi: abi,
+							functionName: params.functionName,
+							args: args
+						});
+					});
+
+					const results = await Promise.all(promises);
+					const serializedResults = results.map(r => this._serializeBigInts(r));
+
+					console.log('[GodotWeb3] Batch read complete');
+
+					return {
+						results: serializedResults,
+						batchId: paramsArray[0]?.callId || ''
+					};
+
+				} catch (error) {
+					console.error('[GodotWeb3] Batch read error:', error);
+					return this._handleError(error, 'readContractBatch');
 				}
 			},
 
@@ -353,6 +471,10 @@ body {
 					
 					if (!this.currentChain) {
 						return { error: true, code: -4, message: 'Chain not configured. Please reconnect wallet.' };
+					}
+
+					if (!this._isValidAddress(params.address)) {
+						return { error: true, code: -5, message: 'Invalid contract address' };
 					}
 
 					const abi = JSON.parse(params.abi);
@@ -395,6 +517,14 @@ body {
 					
 					if (!this.currentChain) {
 						return { error: true, code: -4, message: 'Chain not configured. Please reconnect wallet.' };
+					}
+
+					if (!this._isValidAddress(params.to)) {
+						return { error: true, code: -5, message: 'Invalid recipient address' };
+					}
+
+					if (!this._isValidWeiAmount(params.valueWei)) {
+						return { error: true, code: -6, message: 'Invalid wei amount' };
 					}
 
 					const hash = await this.walletClient.sendTransaction({
@@ -495,10 +625,11 @@ body {
 
 					const receipt = await this.publicClient.waitForTransactionReceipt({
 						hash: hash,
-						confirmations: 1
+						confirmations: 1,
+						timeout: 60_000  // 60 seconds
 					});
 
-					// Convert receipt to plain JavaScript object with string values
+					// Serialize BigInts to strings
 					const serializedReceipt = {
 						blockNumber: receipt.blockNumber.toString(),
 						blockHash: receipt.blockHash,
@@ -512,34 +643,41 @@ body {
 
 					console.log('[GodotWeb3] Transaction confirmed:', hash);
 
-					// Convert to JSON string for Godot (JavaScriptBridge doesn't preserve object properties)
 					if (this._onTransactionReceipt) {
-						console.log('[GodotWeb3] Transaction receipt:', serializedReceipt);
-						this._onTransactionReceipt(serializedReceipt);
+						this._onTransactionReceipt([serializedReceipt]);
 					}
 
 				} catch (error) {
 					console.error('[GodotWeb3] Error watching transaction:', error);
+					// Emit error through callback if available
+					if (this._onTransactionReceipt) {
+						this._onTransactionReceipt([{
+							error: true,
+							code: -7,
+							message: error.message || 'Transaction timeout or failed',
+							hash: hash
+						}]);
+					}
 				}
 			},
 
 			/**
-			 * Serialize values for Godot (convert BigInt, etc.)
+			 * Serialize BigInts to strings for Godot compatibility
 			 * @param {*} value - Value to serialize
 			 * @returns {*} Serialized value
 			 * @private
 			 */
-			_serializeValue: function(value) {
+			_serializeBigInts: function(value) {
 				if (typeof value === 'bigint') {
 					return value.toString();
 				}
 				if (Array.isArray(value)) {
-					return value.map(v => this._serializeValue(v));
+					return value.map(v => this._serializeBigInts(v));
 				}
 				if (value && typeof value === 'object') {
 					const serialized = {};
 					for (const key in value) {
-						serialized[key] = this._serializeValue(value[key]);
+						serialized[key] = this._serializeBigInts(value[key]);
 					}
 					return serialized;
 				}
@@ -648,7 +786,6 @@ const engine = new Engine(GODOT_CONFIG);
 			} catch (err) {
 				serviceWorkerRegistrationPromise = Promise.reject(new Error('Service worker registration failed.'));
 			}
-			// There's a chance that installing the service worker would fix the issue
 			Promise.race([
 				serviceWorkerRegistrationPromise.then((registration) => {
 					if (registration != null) {
@@ -656,18 +793,15 @@ const engine = new Engine(GODOT_CONFIG);
 					}
 					return registration;
 				}).then(() => engine.installServiceWorker()),
-				// For some reason, `getRegistration()` can stall
 				new Promise((resolve) => {
 					setTimeout(() => resolve(), 2000);
 				}),
 			]).then(() => {
-				// Reload if there was no error.
 				window.location.reload();
 			}).catch((err) => {
 				console.error('Error while registering service worker:', err);
 			});
 		} else {
-			// Display the message as usual
 			const missingMsg = 'Error\nThe following features required to run Godot projects on the Web are missing:\n';
 			displayFailureNotice(missingMsg + missing.join('\n'));
 		}
