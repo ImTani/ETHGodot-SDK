@@ -507,29 +507,23 @@ func _check_connection() -> bool:
 	
 	return true
 
-## FIX: Check if a result is an error (works with JavaScriptObjects)
 func _is_error_result(result: Variant) -> bool:
-	# JavaScriptObjects support property access but aren't Dictionaries
-	# Check if the 'error' property exists and is truthy
 	if result == null:
 		return false
 	
-	# Try to access the error property - works for both Dictionary and JavaScriptObject
-	var has_error = false
+	# For Dictionary
 	if result is Dictionary:
-		has_error = result.get("error", false)
-	else:
-		# For JavaScriptObject, try property access
-		# Use a try-catch pattern via checking if property exists
-		var error_val = result.error if "error" in str(result) else false
-		# Safer: directly access and handle null
-		if result.has("error"):
-			has_error = result.error
-		else:
-			# Direct property access (JavaScriptObject allows this)
-			has_error = result.error if result.error != null else false
+		return result.get("error", false)
 	
-	return has_error
+	# For JavaScriptObject, we need to try-catch property access
+	# JavaScriptObjects don't have a has() method
+	# We can check by attempting to read the property and handling null
+	var error_value = result.error
+	
+	# If the property doesn't exist, it returns null
+	# If it exists and is false/null, that's also not an error
+	# Only return true if error_value is explicitly truthy
+	return error_value != null and error_value != false
 
 ## FIX: Validate wei amount (positive number string)
 func _is_valid_wei_amount(amount: String) -> bool:
@@ -608,8 +602,6 @@ func _on_transaction_receipt_js(args: Array) -> void:
 		transaction_failed.emit(tx_hash, error_msg)
 		return
 	
-	# FIX: Pass JavaScriptObject directly - consumers can access properties
-	# No need to manually convert to Dictionary
 	print("[Web3Manager] Transaction confirmed: ", receipt.transactionHash)
 	transaction_receipt.emit(receipt)
 
